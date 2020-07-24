@@ -4,46 +4,9 @@
 
 #include <uv.h>
 
-#include <algorithm>
-#include <iostream>
 #include <string>
-#include <vector>
 
 #include <structs.h>
-
-const std::string HOSTKEY = "host: ";
-const std::string headerDelimiter = "\r\n";
-const std::string COLON = ":";
-const std::string DEFAULT_PORT = "80";
-
-void parseHost(const std::vector<char>& buffer, std::string& host, std::string& port)
-{
-    port = DEFAULT_PORT;
-    host.clear();
-    if (buffer.size() <= HOSTKEY.size())
-        return;
-    
-    std::string buffer_s(&buffer[0], &buffer[buffer.size()-1]);
-    std::transform(buffer_s.begin(), buffer_s.end(), buffer_s.begin(), ::tolower);
-    
-    auto hostIndex = buffer_s.find(HOSTKEY);
-    //std::cout<<buffer_s<<"\n";
-    if (hostIndex == std::string::npos)
-        return;
-
-    auto hostIndexEnd = buffer_s.find(headerDelimiter, hostIndex + HOSTKEY.size());
-    if (hostIndexEnd == std::string::npos)
-        return;
-
-    host = buffer_s.substr(hostIndex+HOSTKEY.size(), 
-                           hostIndexEnd-hostIndex-HOSTKEY.size());
-    //std::cout<<host<<"\n";
-    auto colonIndex = host.find(COLON);
-    if (colonIndex == std::string::npos)
-        return;
-    port = host.substr(colonIndex+1, host.size()-colonIndex-1);
-    host.resize(colonIndex);
-}
 
 void logmsg(const char* format, ...)
 {
@@ -60,6 +23,22 @@ void logmsg(const char* format, ...)
     vfprintf(stdout, format, ap);
     va_end(ap);
     fflush(stdout);
+}
+
+void free_write_req(uv_write_t *req) 
+{
+    write_req_t *wr = (write_req_t*) req;
+    free(wr->buf.base);
+    free(wr);
+}
+
+void on_write_end(uv_write_t *req, int status) 
+{
+  if (status == -1) 
+  {
+    logmsg("error on_write_end");
+  }
+  free_write_req(req);
 }
 
 void fillClientDebugInfo(Request *request)

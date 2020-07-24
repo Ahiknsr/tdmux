@@ -12,8 +12,8 @@ if ( MSVC )
     set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} /W4")
 endif()
 
-add_executable(client tcpclient.c)
-add_executable(server tcpserver.cpp proxyutils.cpp)
+add_executable(client tcpClient.c)
+add_executable(server tcpServer.cpp proxyUtils.cpp requestPreProcessor.cpp)
 
 include_directories(server ${CMAKE_CURRENT_SOURCE_DIR})
 

@@ -12,7 +12,7 @@
 #define DEFAULT_PORT 7000
 #define DEFAULT_BACKLOG 128
 
-void parseHost(const std::vector<char>& buffer, std::string& host, std::string& port);
+int preProcess(Request *request, uv_loop_t *loop);
 void logmsg(const char* format, ...);
 void fillClientDebugInfo(Request *request);
 std::string getClientInfo(const Request *request);
@@ -21,12 +21,8 @@ std::string getRequestInfo(const Request *request);
 
 uv_loop_t *loop;
 
-void free_write_req(uv_write_t *req) 
-{
-    write_req_t *wr = (write_req_t*) req;
-    free(wr->buf.base);
-    free(wr);
-}
+void free_write_req(uv_write_t *req);
+void on_write_end(uv_write_t *req, int status);
 
 void free_handle(uv_handle_t *handle)
 {
@@ -34,7 +30,7 @@ void free_handle(uv_handle_t *handle)
     delete handle_r;
 }
 
-void destroyRequest(Request *request)
+void deleteRequest(Request *request)
 {
     if (request == nullptr)
         return;
@@ -65,15 +61,6 @@ void alloc_buffer(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf)
     buf->len = suggested_size;
 }
 
-void on_write_end(uv_write_t *req, int status) 
-{
-  if (status == -1) 
-  {
-    logmsg("error on_write_end");
-  }
-  free_write_req(req);
-}
-
 void on_client_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf)
 {
     uv_tcp_t_r* client_r = (uv_tcp_t_r*)client;
@@ -93,7 +80,7 @@ void on_client_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf)
             logmsg("connection %s received EOF from client\n", getRequestInfo(request).c_str());
         }
         
-        destroyRequest(request);
+        deleteRequest(request);
         return;
     }
     else
@@ -127,11 +114,12 @@ void on_server_read(uv_stream_t *server, ssize_t nread, const uv_buf_t *buf)
         {
             logmsg("connection %s received EOF from server\n", getRequestInfo(request).c_str());
         }
-        destroyRequest(request);
+        deleteRequest(request);
         return;
     }
     else
     {
+        logmsg("server data is bytes %d %s\n", nread, buf->base);
         // write to client
         write_req_t *write_req = (write_req_t*) malloc(sizeof(write_req_t));
         write_req->buf = uv_buf_init((char*) malloc(nread), nread);
@@ -153,20 +141,23 @@ void on_server_connect(uv_connect_t *req, int status)
     if (status < 0) 
     {
         logmsg("error on_server_connect %s \n", uv_err_name(status));
-        destroyRequest(request);
+        deleteRequest(request);
         return;
     }
     assert(status == 0);
     logmsg("client %s connected to server %s\n", getClientInfo(request).c_str(), 
                                                  getServerInfo(request).c_str());
 
-    write_req_t *write_req = (write_req_t*) malloc(sizeof(write_req_t));
-    auto client_r_buffer_len = request->crbuffer.size();
-    write_req->buf = uv_buf_init((char*) malloc(client_r_buffer_len), client_r_buffer_len);
-    memcpy(write_req->buf.base, &request->crbuffer[0], client_r_buffer_len);
-    request->crbuffer.resize(0);
+    if (request->crbuffer.size() > 0)
+    {
+        write_req_t *write_req = (write_req_t*) malloc(sizeof(write_req_t));
+        auto client_r_buffer_len = request->crbuffer.size();
+        write_req->buf = uv_buf_init((char*) malloc(client_r_buffer_len), client_r_buffer_len);
+        memcpy(write_req->buf.base, &request->crbuffer[0], client_r_buffer_len);
+        request->crbuffer.resize(0);
 
-    uv_write((uv_write_t*)write_req, (uv_stream_t*)server, &write_req->buf, 1 /*nbufs*/, on_write_end);
+        uv_write((uv_write_t*)write_req, (uv_stream_t*)server, &write_req->buf, 1 /*nbufs*/, on_write_end);
+    }
     uv_read_start((uv_stream_t*) request->client, alloc_buffer, on_client_read);
     uv_read_start((uv_stream_t*) request->server, alloc_buffer, on_server_read);
 }
@@ -179,7 +170,7 @@ void on_resolved(uv_getaddrinfo_t *resolver, int status, struct addrinfo *res)
     if (status < 0) 
     {
         logmsg("getaddrinfo callback error %s\n", uv_err_name(status));
-        destroyRequest(request);
+        deleteRequest(request);
     }
     else
     {
@@ -214,7 +205,7 @@ void on_client_init_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf
     {
         if (nread != UV_EOF)
             logmsg("Read error %s\n", uv_err_name(nread));
-        destroyRequest(request);
+        deleteRequest(request);
         return;
     }
     else
@@ -225,10 +216,10 @@ void on_client_init_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf
         // todo: check the buffer size and fail if exceeds threshold
         memcpy(&(request->crbuffer[0])+curr_cr_buffer_len, buf->base, nread);
         free(buf->base);
-        // check for Host header
-        parseHost(request->crbuffer, request->serverName, request->serverPort);
+
+        // check for Host header or CONNECT request
         // connect to server and create a pipe between server and client
-        if(request->serverName.size()>0)
+        if(preProcess(request, loop))
         {
             logmsg("client %s sent request for %s\n", getClientInfo(request).c_str(), 
                                                       getServerInfo(request).c_str());
@@ -248,7 +239,7 @@ void on_client_init_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf
             if (result)
             {
                 delete resolver;
-                destroyRequest(request);
+                deleteRequest(request);
             }
         }
         else
@@ -262,8 +253,7 @@ void on_new_connection(uv_stream_t *server, int status)
 {
     if (status < 0) 
     {
-        fprintf(stderr, "New connection error %s\n", uv_strerror(status));
-        // error!
+        logmsg("New connection error %s\n", uv_strerror(status));
         return;
     }
 
@@ -282,7 +272,7 @@ void on_new_connection(uv_stream_t *server, int status)
     }
     else 
     {
-        destroyRequest(request);
+        deleteRequest(request);
     }
 }
 

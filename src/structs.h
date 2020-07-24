@@ -1,3 +1,5 @@
+#include <string>
+#include <vector>
 #include <uv.h>
 
 #define UNUSEDPARAM(x) (void)(x)
