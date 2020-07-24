@@ -36,6 +36,7 @@ void on_read(uv_stream_t *server, ssize_t nread, const uv_buf_t* buf)
   }
   else
   {
+      printf("received response\n");
       printf("%s", buf->base);
   }
   if(buf->base)
