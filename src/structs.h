@@ -1,7 +1,14 @@
+#include <uv.h>
+
+#define UNUSEDPARAM(x) (void)(x)
+
 struct Request
 {
     uv_tcp_t *client;
     uv_tcp_t *server;
+    std::string clientIp;
+    std::string clientPort;
+    std::string serverName;
     std::string serverIp;
     std::string serverPort;
     std::vector<char> crbuffer;
@@ -14,6 +21,7 @@ struct Request
         server = nullptr;
         serverIp = "";
         serverPort = "80";
+        serverName = "";
     }
     Request(const Request&) = delete;
     Request& operator=(const Request&) = delete;

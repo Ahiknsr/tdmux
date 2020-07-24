@@ -11,10 +11,13 @@
 
 #define DEFAULT_PORT 7000
 #define DEFAULT_BACKLOG 128
-#define UNUSEDPARAM(x) (void)(x)
 
 void parseHost(const std::vector<char>& buffer, std::string& host, std::string& port);
 void logmsg(const char* format, ...);
+void fillClientDebugInfo(Request *request);
+std::string getClientInfo(const Request *request);
+std::string getServerInfo(const Request *request);
+std::string getRequestInfo(const Request *request);
 
 uv_loop_t *loop;
 
@@ -35,8 +38,11 @@ void destroyRequest(Request *request)
 {
     if (request == nullptr)
         return;
+
+    logmsg("destroying request %s\n", getRequestInfo(request).c_str());
     uv_tcp_t_r *client = (uv_tcp_t_r*)request->client;
     uv_tcp_t_r *server = (uv_tcp_t_r*)request->server;
+
     if (client)
     {
         request->client = nullptr;
@@ -64,7 +70,6 @@ void on_write_end(uv_write_t *req, int status)
   if (status == -1) 
   {
     logmsg("error on_write_end");
-    // free request?
   }
   free_write_req(req);
 }
@@ -74,10 +79,20 @@ void on_client_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf)
     uv_tcp_t_r* client_r = (uv_tcp_t_r*)client;
     Request* request = client_r->request;
 
+    logmsg("connection %s received data from client\n", getRequestInfo(request).c_str());
+    
     if(nread < 0)
     {
         if (nread != UV_EOF)
-            logmsg("Read error %s\n", uv_err_name(nread));
+        {
+            logmsg("connection %s client read error %s\n", getRequestInfo(request).c_str(),
+                                                           uv_err_name(nread));
+        }
+        else
+        {
+            logmsg("connection %s received EOF from client\n", getRequestInfo(request).c_str());
+        }
+        
         destroyRequest(request);
         return;
     }
@@ -96,14 +111,22 @@ void on_client_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf)
 
 void on_server_read(uv_stream_t *server, ssize_t nread, const uv_buf_t *buf) 
 {
-    logmsg("read from server\n");
     uv_tcp_t_r* server_r = (uv_tcp_t_r*)server;
     Request* request = server_r->request;
+
+    logmsg("connection %s received data from server\n", getRequestInfo(request).c_str());
 
     if(nread < 0)
     {
         if (nread != UV_EOF)
-            logmsg("Read error %s\n", uv_err_name(nread));
+        {
+            logmsg("connection %s server read error %s\n", getRequestInfo(request).c_str(),
+                                                           uv_err_name(nread));
+        }
+        else
+        {
+            logmsg("connection %s received EOF from server\n", getRequestInfo(request).c_str());
+        }
         destroyRequest(request);
         return;
     }
@@ -134,14 +157,15 @@ void on_server_connect(uv_connect_t *req, int status)
         return;
     }
     assert(status == 0);
-    
+    logmsg("client %s connected to server %s\n", getClientInfo(request).c_str(), 
+                                                 getServerInfo(request).c_str());
+
     write_req_t *write_req = (write_req_t*) malloc(sizeof(write_req_t));
     auto client_r_buffer_len = request->crbuffer.size();
     write_req->buf = uv_buf_init((char*) malloc(client_r_buffer_len), client_r_buffer_len);
     memcpy(write_req->buf.base, &request->crbuffer[0], client_r_buffer_len);
     request->crbuffer.resize(0);
 
-    logmsg("writing to server\n");
     uv_write((uv_write_t*)write_req, (uv_stream_t*)server, &write_req->buf, 1 /*nbufs*/, on_write_end);
     uv_read_start((uv_stream_t*) request->client, alloc_buffer, on_client_read);
     uv_read_start((uv_stream_t*) request->server, alloc_buffer, on_server_read);
@@ -161,8 +185,9 @@ void on_resolved(uv_getaddrinfo_t *resolver, int status, struct addrinfo *res)
     {
         char addr[17] = {'\0'};
         uv_ip4_name((struct sockaddr_in*) res->ai_addr, addr, 16);
-        fprintf(stderr, "ip addr is %s\n", addr);
+        request->serverIp = addr;
 
+        logmsg("server name %s resolved to %s\n", request->serverName.c_str(), request->serverIp.c_str());
         uv_connect_t_r *connect_req = new uv_connect_t_r();
         connect_req->request = request;
 
@@ -195,17 +220,18 @@ void on_client_init_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf
     else
     {
         auto curr_cr_buffer_len = request->crbuffer.size();
+        logmsg("temp %d %d\n", curr_cr_buffer_len, curr_cr_buffer_len+nread);
         request->crbuffer.resize(curr_cr_buffer_len+nread);
         // todo: check the buffer size and fail if exceeds threshold
         memcpy(&(request->crbuffer[0])+curr_cr_buffer_len, buf->base, nread);
         free(buf->base);
-        // printf("%s", &(buffered_client->cdata[0]));
-        // can obtain the server connection
-        parseHost(request->crbuffer, request->serverIp, request->serverPort);
+        // check for Host header
+        parseHost(request->crbuffer, request->serverName, request->serverPort);
         // connect to server and create a pipe between server and client
-        if(request->serverIp.size()>0)
+        if(request->serverName.size()>0)
         {
-            logmsg("host %s port %s\n", request->serverIp.c_str(), request->serverPort.c_str());
+            logmsg("client %s sent request for %s\n", getClientInfo(request).c_str(), 
+                                                      getServerInfo(request).c_str());
 
             struct addrinfo hints;;
             hints.ai_family = PF_INET;
@@ -217,7 +243,7 @@ void on_client_init_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf
             resolver->request = request;
 
             int result = uv_getaddrinfo(loop, (uv_getaddrinfo_t*)resolver, on_resolved, 
-                                   request->serverIp.c_str(), request->serverPort.c_str(), &hints);
+                                   request->serverName.c_str(), request->serverPort.c_str(), &hints);
 
             if (result)
             {
@@ -250,6 +276,8 @@ void on_new_connection(uv_stream_t *server, int status)
     uv_tcp_init(loop, (uv_tcp_t*)client);
     if (uv_accept(server, (uv_stream_t*) client) == 0)
     {
+        fillClientDebugInfo(request);
+        logmsg("new connection from : %s \n", getClientInfo(request).c_str());
         uv_read_start((uv_stream_t*) client, alloc_buffer, on_client_init_read);
     }
     else 
@@ -258,14 +286,17 @@ void on_new_connection(uv_stream_t *server, int status)
     }
 }
 
+
 int main() 
 {
-    loop = uv_default_loop();
-
     uv_tcp_t server;
     struct sockaddr_in addr;
+
+    loop = uv_default_loop();
+
     uv_tcp_init(loop, &server);
 
+    logmsg("server listening on port %d\n", DEFAULT_PORT);
     uv_ip4_addr("0.0.0.0", DEFAULT_PORT, &addr);
 
     uv_tcp_bind(&server, (const struct sockaddr*)&addr, 0);
@@ -275,5 +306,7 @@ int main()
         fprintf(stderr, "Listen error %s\n", uv_strerror(r));
         return 1;
     }
-    return uv_run(loop, UV_RUN_DEFAULT);
+
+    uv_run(loop, UV_RUN_DEFAULT);
+    return 0;
 }
