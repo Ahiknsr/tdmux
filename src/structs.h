@@ -1,8 +1,18 @@
+#pragma once
+
 #include <string>
 #include <vector>
 #include <uv.h>
 
 #define UNUSEDPARAM(x) (void)(x)
+
+enum Protocol
+{
+    UNKNOWN,
+    HTTP,
+    HTTPS,
+    SSH
+};
 
 struct Request
 {
@@ -17,6 +27,8 @@ struct Request
     std::vector<char> cwbuffer;
     std::vector<char> srbuffer;
     std::vector<char> swbuffer;
+    FILE *logfile;
+    Protocol protocol;
     Request()
     {
         client = nullptr;
@@ -24,6 +36,8 @@ struct Request
         serverIp = "";
         serverPort = "80";
         serverName = "";
+        logfile = nullptr;
+        protocol = Protocol::UNKNOWN;
     }
     Request(const Request&) = delete;
     Request& operator=(const Request&) = delete;

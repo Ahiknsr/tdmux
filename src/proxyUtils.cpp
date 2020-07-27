@@ -2,11 +2,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include <uv.h>
-
-#include <string>
-
-#include <structs.h>
+#include <proxyUtils.h>
 
 void logmsg(const char* format, ...)
 {
@@ -43,6 +39,7 @@ void on_write_end(uv_write_t *req, int status)
 
 void fillClientDebugInfo(Request *request)
 {
+    request->logfile =  fopen(getLogFileName(request).c_str(), "a");
     uv_tcp_t *client = request->client;
 	struct sockaddr_storage storage;
     int len, res;
@@ -59,7 +56,7 @@ void fillClientDebugInfo(Request *request)
     }
 
     res = getnameinfo((struct sockaddr*)&storage, len, ip, 
-                NI_MAXHOST, port, NI_MAXSERV, 0);
+                NI_MAXHOST, port, NI_MAXSERV, NI_NUMERICHOST);
     if (res != 0) 
     {
         logmsg("getnameinfo failed\n");
@@ -86,4 +83,16 @@ std::string getServerInfo(const Request *request)
 std::string getRequestInfo(const Request *request)
 {
     return getClientInfo(request) + "::" + getServerInfo(request);
+}
+
+std::string getLogFileName(const Request *request)
+{
+    // todo: replace tmpnam with mkstemp
+    // filename should contain client ip
+    UNUSEDPARAM(request);
+    char logFileName[L_tmpnam];
+    tmpnam(logFileName);
+    std::string logFileName_S(logFileName);
+    logmsg("log file is %s\n", logFileName_S.c_str());
+    return logFileName_S;
 }

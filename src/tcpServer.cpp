@@ -4,25 +4,13 @@
 
 #include <cassert>
 #include <cstring>
-#include <string>
-#include <vector> 
 
 #include <structs.h>
-
-#define DEFAULT_PORT 7000
-#define DEFAULT_BACKLOG 128
-
-int preProcess(Request *request, uv_loop_t *loop);
-void logmsg(const char* format, ...);
-void fillClientDebugInfo(Request *request);
-std::string getClientInfo(const Request *request);
-std::string getServerInfo(const Request *request);
-std::string getRequestInfo(const Request *request);
+#include <proxyUtils.h>
+#include <requestPreProcessor.h>
+#include <configManager.h>
 
 uv_loop_t *loop;
-
-void free_write_req(uv_write_t *req);
-void on_write_end(uv_write_t *req, int status);
 
 void free_handle(uv_handle_t *handle)
 {
@@ -51,6 +39,7 @@ void deleteRequest(Request *request)
         server->request = nullptr;
         uv_close((uv_handle_t*)server, free_handle);
     }
+    fclose(request->logfile);
     delete request;
 }
 
@@ -66,7 +55,7 @@ void on_client_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf)
     uv_tcp_t_r* client_r = (uv_tcp_t_r*)client;
     Request* request = client_r->request;
 
-    logmsg("connection %s received data from client\n", getRequestInfo(request).c_str());
+    logmsg("connection %s received %ld bytes from client\n", getRequestInfo(request).c_str(), nread);
     
     if(nread < 0)
     {
@@ -74,10 +63,6 @@ void on_client_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf)
         {
             logmsg("connection %s client read error %s\n", getRequestInfo(request).c_str(),
                                                            uv_err_name(nread));
-        }
-        else
-        {
-            logmsg("connection %s received EOF from client\n", getRequestInfo(request).c_str());
         }
         
         deleteRequest(request);
@@ -87,10 +72,10 @@ void on_client_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf)
     {
         // write to server
         write_req_t *write_req = (write_req_t*) malloc(sizeof(write_req_t));
-        write_req->buf = uv_buf_init((char*) malloc(nread), nread);
-        memcpy(write_req->buf.base, buf->base, nread);
-        free(buf->base);
-
+        // reuse the existing buffer
+        write_req->buf = uv_buf_init((char*) buf->base, nread);
+        // if (ConfigManager::getInstance().isLoggingEnabled(request))
+            fwrite(buf->base, sizeof(char), nread, request->logfile);
         uv_write((uv_write_t*)write_req, (uv_stream_t*)request->server, 
                     &write_req->buf, 1 /*nbufs*/, on_write_end);
     }
@@ -101,7 +86,7 @@ void on_server_read(uv_stream_t *server, ssize_t nread, const uv_buf_t *buf)
     uv_tcp_t_r* server_r = (uv_tcp_t_r*)server;
     Request* request = server_r->request;
 
-    logmsg("connection %s received data from server\n", getRequestInfo(request).c_str());
+    logmsg("connection %s received %ld bytes from server\n", getRequestInfo(request).c_str(), nread);
 
     if(nread < 0)
     {
@@ -110,22 +95,17 @@ void on_server_read(uv_stream_t *server, ssize_t nread, const uv_buf_t *buf)
             logmsg("connection %s server read error %s\n", getRequestInfo(request).c_str(),
                                                            uv_err_name(nread));
         }
-        else
-        {
-            logmsg("connection %s received EOF from server\n", getRequestInfo(request).c_str());
-        }
         deleteRequest(request);
         return;
     }
     else
     {
-        logmsg("server data is bytes %d %s\n", nread, buf->base);
         // write to client
         write_req_t *write_req = (write_req_t*) malloc(sizeof(write_req_t));
-        write_req->buf = uv_buf_init((char*) malloc(nread), nread);
-        memcpy(write_req->buf.base, buf->base, nread);
-        free(buf->base);
-
+        // reuse the existing buffer
+        write_req->buf = uv_buf_init((char*) buf->base, nread);
+        // if (ConfigManager::getInstance().isLoggingEnabled(request))
+            fwrite(buf->base, sizeof(char), nread, request->logfile);
         uv_write((uv_write_t*)write_req, (uv_stream_t*)request->client, 
                     &write_req->buf, 1 /*nbufs*/, on_write_end);
     }
@@ -155,8 +135,10 @@ void on_server_connect(uv_connect_t *req, int status)
         write_req->buf = uv_buf_init((char*) malloc(client_r_buffer_len), client_r_buffer_len);
         memcpy(write_req->buf.base, &request->crbuffer[0], client_r_buffer_len);
         request->crbuffer.resize(0);
-
-        uv_write((uv_write_t*)write_req, (uv_stream_t*)server, &write_req->buf, 1 /*nbufs*/, on_write_end);
+        // if (ConfigManager::getInstance().isLoggingEnabled(request))
+            fwrite(write_req->buf.base, sizeof(char), client_r_buffer_len, request->logfile);
+        uv_write((uv_write_t*)write_req, (uv_stream_t*)server, &write_req->buf, 
+                  1 /*nbufs*/, on_write_end);
     }
     uv_read_start((uv_stream_t*) request->client, alloc_buffer, on_client_read);
     uv_read_start((uv_stream_t*) request->server, alloc_buffer, on_server_read);
@@ -210,8 +192,11 @@ void on_client_init_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf
     }
     else
     {
+        logmsg("begin dump:\n");
+        for(int i=0;i<nread;i++)
+            printf("%c", *(buf->base+i));
+        logmsg(":end dump\n");
         auto curr_cr_buffer_len = request->crbuffer.size();
-        logmsg("temp %d %d\n", curr_cr_buffer_len, curr_cr_buffer_len+nread);
         request->crbuffer.resize(curr_cr_buffer_len+nread);
         // todo: check the buffer size and fail if exceeds threshold
         memcpy(&(request->crbuffer[0])+curr_cr_buffer_len, buf->base, nread);
@@ -272,6 +257,7 @@ void on_new_connection(uv_stream_t *server, int status)
     }
     else 
     {
+        logmsg("uv_accept failed\n");
         deleteRequest(request);
     }
 }
@@ -279,24 +265,31 @@ void on_new_connection(uv_stream_t *server, int status)
 
 int main() 
 {
+    const std::string IP = "0.0.0.0";
+    const int PORT = 7000;
+    const int BACKLOG = 128;
     uv_tcp_t server;
     struct sockaddr_in addr;
 
+    std::string fpath = "aaa";
+    auto config = ConfigManager(fpath);
+    UNUSEDPARAM(config);
     loop = uv_default_loop();
 
     uv_tcp_init(loop, &server);
 
-    logmsg("server listening on port %d\n", DEFAULT_PORT);
-    uv_ip4_addr("0.0.0.0", DEFAULT_PORT, &addr);
+    logmsg("Server listening on ip %s port %d\n", IP.c_str(), PORT);
+    uv_ip4_addr(IP.c_str(), PORT, &addr);
 
     uv_tcp_bind(&server, (const struct sockaddr*)&addr, 0);
-    int r = uv_listen((uv_stream_t*) &server, DEFAULT_BACKLOG, on_new_connection);
+    int r = uv_listen((uv_stream_t*) &server, BACKLOG, on_new_connection);
     if (r) 
     {
         fprintf(stderr, "Listen error %s\n", uv_strerror(r));
         return 1;
     }
 
+    //auto config = ConfigManager::getInstance().getConfig("aa");
     uv_run(loop, UV_RUN_DEFAULT);
     return 0;
 }
