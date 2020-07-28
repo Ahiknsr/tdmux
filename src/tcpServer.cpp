@@ -10,7 +10,8 @@
 #include <requestPreProcessor.h>
 #include <configManager.h>
 
-uv_loop_t *loop;
+uv_loop_t *loop{nullptr};
+ConfigManager *config{nullptr};
 
 void free_handle(uv_handle_t *handle)
 {
@@ -24,6 +25,7 @@ void deleteRequest(Request *request)
         return;
 
     logmsg("destroying request %s\n", getRequestInfo(request).c_str());
+
     uv_tcp_t_r *client = (uv_tcp_t_r*)request->client;
     uv_tcp_t_r *server = (uv_tcp_t_r*)request->server;
 
@@ -39,7 +41,10 @@ void deleteRequest(Request *request)
         server->request = nullptr;
         uv_close((uv_handle_t*)server, free_handle);
     }
-    fclose(request->logfile);
+    if (request->logfile)
+    {
+        fclose(request->logfile);
+    }
     delete request;
 }
 
@@ -64,18 +69,18 @@ void on_client_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf)
             logmsg("connection %s client read error %s\n", getRequestInfo(request).c_str(),
                                                            uv_err_name(nread));
         }
-        
         deleteRequest(request);
         return;
     }
     else
     {
-        // write to server
+        // write to server using the existing buffer
         write_req_t *write_req = (write_req_t*) malloc(sizeof(write_req_t));
-        // reuse the existing buffer
         write_req->buf = uv_buf_init((char*) buf->base, nread);
-        // if (ConfigManager::getInstance().isLoggingEnabled(request))
+    
+        if (config->isEnabled(config->HTTPLOGGING))
             fwrite(buf->base, sizeof(char), nread, request->logfile);
+
         uv_write((uv_write_t*)write_req, (uv_stream_t*)request->server, 
                     &write_req->buf, 1 /*nbufs*/, on_write_end);
     }
@@ -100,12 +105,13 @@ void on_server_read(uv_stream_t *server, ssize_t nread, const uv_buf_t *buf)
     }
     else
     {
-        // write to client
+        // write to client using the existing buffer
         write_req_t *write_req = (write_req_t*) malloc(sizeof(write_req_t));
-        // reuse the existing buffer
         write_req->buf = uv_buf_init((char*) buf->base, nread);
-        // if (ConfigManager::getInstance().isLoggingEnabled(request))
+    
+        if (config->isEnabled(config->HTTPLOGGING))
             fwrite(buf->base, sizeof(char), nread, request->logfile);
+
         uv_write((uv_write_t*)write_req, (uv_stream_t*)request->client, 
                     &write_req->buf, 1 /*nbufs*/, on_write_end);
     }
@@ -135,7 +141,7 @@ void on_server_connect(uv_connect_t *req, int status)
         write_req->buf = uv_buf_init((char*) malloc(client_r_buffer_len), client_r_buffer_len);
         memcpy(write_req->buf.base, &request->crbuffer[0], client_r_buffer_len);
         request->crbuffer.resize(0);
-        // if (ConfigManager::getInstance().isLoggingEnabled(request))
+        if (config->isEnabled(config->HTTPLOGGING))
             fwrite(write_req->buf.base, sizeof(char), client_r_buffer_len, request->logfile);
         uv_write((uv_write_t*)write_req, (uv_stream_t*)server, &write_req->buf, 
                   1 /*nbufs*/, on_write_end);
@@ -271,9 +277,7 @@ int main()
     uv_tcp_t server;
     struct sockaddr_in addr;
 
-    std::string fpath = "aaa";
-    auto config = ConfigManager(fpath);
-    UNUSEDPARAM(config);
+    config = new ConfigManager();
     loop = uv_default_loop();
 
     uv_tcp_init(loop, &server);
@@ -283,13 +287,12 @@ int main()
 
     uv_tcp_bind(&server, (const struct sockaddr*)&addr, 0);
     int r = uv_listen((uv_stream_t*) &server, BACKLOG, on_new_connection);
-    if (r) 
+    if (r)
     {
         fprintf(stderr, "Listen error %s\n", uv_strerror(r));
         return 1;
     }
 
-    //auto config = ConfigManager::getInstance().getConfig("aa");
     uv_run(loop, UV_RUN_DEFAULT);
     return 0;
 }
