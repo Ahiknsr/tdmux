@@ -26,6 +26,8 @@ int preProcess(Request *request, uv_loop_t *loop)
         return true;
     if (parseSSHRequest(request))
         return true;
+    if (parseSSLRequest(request))
+        return true;
     return false;
 }
 
@@ -118,7 +120,7 @@ int parseHostHeader(Request *request)
     return true;
 }
 
-int parseSSHRequest(Request* request)
+int parseSSHRequest(Request *request)
 {
     auto buffer = request->crbuffer;
     if (buffer.size() <= SSH_PREFIX.size())
@@ -135,4 +137,157 @@ int parseSSHRequest(Request* request)
     request->serverName = "localhost";
     request->serverPort = "22";
     return true;
+}
+
+/*
+copy n bytes from src to dest
+ordering of bytes copied depends on endianness
+*/
+void copybytes(uint8_t *dest, uint8_t *src, size_t n)
+{
+    auto isLittleEndian =[](){
+        uint16_t temp = 1;
+        return (*(uint8_t*)(&temp)) == 1;
+    };
+
+    if (n==0)
+        return;
+    
+    bool copyInReverseOrder = isLittleEndian();
+    if(copyInReverseOrder)
+    {
+        dest=dest+n-1;
+        while(n>0)
+        {
+            *dest=*src;
+            dest--;
+            src++;
+            n--;
+        }
+    }
+    else
+    {
+        memcpy(dest, src, n);
+    }
+    
+}
+
+// zero extension check?
+std::string parseHostNameFromExtensions(const std::vector<char> buffer, uint16_t startIndex)
+{
+    uint16_t expectedExtensionLength{0};
+    copybytes((uint8_t*)&expectedExtensionLength, (uint8_t*)&buffer[startIndex], 2);
+
+    logmsg("expectedLen %d\n", expectedExtensionLength);
+    assert(expectedExtensionLength == (buffer.size() - startIndex -2));
+
+    uint16_t currIndex = startIndex+2;
+
+    uint16_t extensionId{0};
+    uint16_t extensionLen{0};
+    uint8_t firstEntryId{0};
+    uint16_t hostNameLen{0};
+
+    uint16_t SNIExtensionId = 0x0000;
+    uint8_t hostNameId = 0x00;
+    while (currIndex < startIndex + 2 + expectedExtensionLength)
+    {
+        copybytes((uint8_t*)&extensionId, (uint8_t*)&buffer[currIndex], 2);
+        copybytes((uint8_t*)&extensionLen, (uint8_t*)&buffer[currIndex+2], 2);
+        logmsg("currIndex: %d\n", currIndex);
+        logmsg("extn id: %02x %02x\n", (uint8_t)buffer[currIndex], (uint8_t)buffer[currIndex+1]);
+        logmsg("extn len: %02x %02x\n", (uint8_t)buffer[currIndex+2], (uint8_t)buffer[currIndex+3]);
+        if (SNIExtensionId == extensionId)
+        {
+            copybytes((uint8_t*)&firstEntryId, (uint8_t*)&buffer[currIndex+6], 1);
+            assert(firstEntryId == hostNameId);
+            copybytes((uint8_t*)&hostNameLen, (uint8_t*)&buffer[currIndex+7], 2);
+            std::string hostName(&buffer[currIndex+9], &buffer[currIndex+9+hostNameLen]);
+            logmsg("hostname %s\n", hostName.c_str());
+        }
+        currIndex = currIndex + 4 + extensionLen;
+    }
+    exit(0);
+    return {};
+}
+
+/*
+parse the clientHello, SNI extension needed
+look at https://tls.ulfheim.net/ for reference
+*/
+int parseSSLRequest(Request *request)
+{
+    auto buffer = request->crbuffer;
+
+    // need at-least 3 bytes
+    if (buffer.size() < 3)
+        return false;
+    
+    const uint8_t handshake_and_SSL_version[] = {0x16, 0x3, 0x1};
+    int cmp_result;
+
+    cmp_result = memcmp(&buffer[0], handshake_and_SSL_version, sizeof(handshake_and_SSL_version));
+
+    if (cmp_result != 0)
+        return false;
+
+    uint16_t messageLength{0};
+    
+    copybytes((uint8_t*)&messageLength, (uint8_t*)&buffer[3], 2);
+
+    uint16_t expectedBufferSize = messageLength + 5;
+    logmsg("messageLength %d buffer %d\n", messageLength, buffer.size());
+
+    if (buffer.size() > expectedBufferSize)
+    {
+        // not a SSL request
+        return false;
+    }
+    if (buffer.size() < expectedBufferSize)
+    {
+        // didn't receive the complete clientHello
+        return false;
+    }
+
+    uint16_t sessionIDLenIndex = 5 /*Record header*/ + 4 /*Handshake header*/ 
+                                + 2 /*client version*/ + 32 /*client random*/;
+    
+    uint16_t sessionIDLength{0};
+    copybytes((uint8_t*)&sessionIDLength, (uint8_t*)(&buffer[sessionIDLenIndex]), 1);
+    logmsg("sessionIDLenIndex %d sessionId length %d\n", sessionIDLenIndex, sessionIDLength);
+
+    for(uint16_t i=0;i<sessionIDLength;i++)
+    {
+        logmsg("%02x ", (uint8_t)buffer[sessionIDLenIndex+1+i]);
+    }
+    logmsg("\n");
+
+    uint16_t cipherSuitesLenIndex = sessionIDLenIndex + sessionIDLength + 1;
+    uint16_t cipherSuitesLength{0};
+    copybytes((uint8_t*)&cipherSuitesLength, (uint8_t*)(&buffer[cipherSuitesLenIndex]), 2);
+    logmsg("cipherSuitesLenIndex %d cipherSuitesLength %d\n", cipherSuitesLenIndex, cipherSuitesLength);
+
+    for(uint16_t i=0;i<cipherSuitesLength;i+=2)
+    {
+        logmsg("%02x %02x ", (uint8_t)buffer[cipherSuitesLenIndex+2+i], 
+                            (uint8_t)buffer[cipherSuitesLenIndex+3+i]);
+    }
+    logmsg("\n");
+
+    uint8_t compressionMethodLenIndex = cipherSuitesLenIndex + cipherSuitesLength + 2;
+    uint8_t compressionMethodLength{0};
+    copybytes(&compressionMethodLength,(uint8_t*)(&buffer[compressionMethodLenIndex]), 1);
+
+    uint8_t extensionsLenIndex = compressionMethodLenIndex + compressionMethodLength + 1;
+    uint16_t extensionsLength{0};
+    copybytes((uint8_t*)&extensionsLength,(uint8_t*)(&buffer[extensionsLenIndex]), 2);
+
+    logmsg("extLenIndex %d buf size %d\n", extensionsLenIndex, buffer.size());
+    for(uint16_t i=extensionsLenIndex;i<buffer.size();i++)
+    {
+        logmsg("%02x ",(uint8_t)buffer[i]);
+    }
+    logmsg("\n");
+    parseHostNameFromExtensions(buffer, extensionsLenIndex);
+    exit(0);
 }

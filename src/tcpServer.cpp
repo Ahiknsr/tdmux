@@ -200,7 +200,7 @@ void on_client_init_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf
     {
         logmsg("begin dump:\n");
         for(int i=0;i<nread;i++)
-            printf("%c", *(buf->base+i));
+            printf("%02x ", (uint8_t)*(buf->base+i));
         logmsg(":end dump\n");
         auto curr_cr_buffer_len = request->crbuffer.size();
         request->crbuffer.resize(curr_cr_buffer_len+nread);
