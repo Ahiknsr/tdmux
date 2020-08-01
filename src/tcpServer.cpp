@@ -5,13 +5,15 @@
 #include <cassert>
 #include <cstring>
 
-#include <structs.h>
+#include <configManager.h>
 #include <proxyUtils.h>
 #include <requestPreProcessor.h>
-#include <configManager.h>
+#include <structs.h>
+#include <sslProcessor.h>
 
 uv_loop_t *loop{nullptr};
 ConfigManager *config{nullptr};
+SSL_CTX *ssl_ctx{nullptr};
 
 void free_handle(uv_handle_t *handle)
 {
@@ -279,6 +281,8 @@ int main()
 
     config = new ConfigManager();
     loop = uv_default_loop();
+    // behind config?
+    ssl_ctx = get_ssl_ctx();
 
     uv_tcp_init(loop, &server);
 

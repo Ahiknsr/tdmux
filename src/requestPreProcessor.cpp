@@ -204,10 +204,10 @@ std::string parseHostNameFromExtensions(const std::vector<char> buffer, uint16_t
             copybytes((uint8_t*)&hostNameLen, (uint8_t*)&buffer[currIndex+7], 2);
             std::string hostName(&buffer[currIndex+9], &buffer[currIndex+9+hostNameLen]);
             logmsg("hostname %s\n", hostName.c_str());
+            return hostName;
         }
         currIndex = currIndex + 4 + extensionLen;
     }
-    exit(0);
     return {};
 }
 
@@ -288,6 +288,96 @@ int parseSSLRequest(Request *request)
         logmsg("%02x ",(uint8_t)buffer[i]);
     }
     logmsg("\n");
-    parseHostNameFromExtensions(buffer, extensionsLenIndex);
+    request->serverName = parseHostNameFromExtensions(buffer, extensionsLenIndex);
+    request->serverPort = "7878";
+    request_init_client_ssl(request);
+    sendServerHello(request);
+    return false;
+}
+
+void request_init_client_ssl(struct Request *request)
+{
+  request->crbio = BIO_new(BIO_s_mem());
+  request->cwbio = BIO_new(BIO_s_mem());
+
+  request->clientssl = SSL_new(get_ssl_ctx());
+
+  SSL_set_accept_state(request->clientssl);
+  SSL_set_bio(request->clientssl, request->crbio, request->cwbio);
+}
+
+enum sslstatus { SSLSTATUS_OK, SSLSTATUS_WANT_IO, SSLSTATUS_FAIL};
+
+static enum sslstatus get_sslstatus(SSL* ssl, int n)
+{
+  switch (SSL_get_error(ssl, n))
+  {
+    case SSL_ERROR_NONE:
+      return SSLSTATUS_OK;
+    case SSL_ERROR_WANT_WRITE:
+    case SSL_ERROR_WANT_READ:
+      return SSLSTATUS_WANT_IO;
+    case SSL_ERROR_ZERO_RETURN:
+    case SSL_ERROR_SYSCALL:
+    default:
+      return SSLSTATUS_FAIL;
+  }
+}
+
+void queue_encrypted_bytes(char *buf, int len, Request *request)
+{
+    write_req_t *write_req = (write_req_t*) malloc(sizeof(write_req_t));
+    write_req->buf = uv_buf_init((char*) malloc(len), len);
+    memcpy(write_req->buf.base, buf, len);
+
+    uv_write((uv_write_t*)write_req, (uv_stream_t*)request->client, 
+        &write_req->buf, 1 /*nbufs*/, on_write_end);
+}
+
+void sendServerHello(Request* request)
+{
+    char buf[500]; /* used for copying bytes out of SSL/BIO */
+    enum sslstatus status;
+    int n;
+
+    auto len = request->crbuffer.size();
+    char *src = &request->crbuffer[0];
+
+    while (len > 0) 
+    {
+    n = BIO_write(request->crbio, src, len);
+
+    if (n<=0)
     exit(0);
+    //   return -1; /* if BIO write fails, assume unrecoverable */
+
+    src += n;
+    len -= n;
+
+    if (!SSL_is_init_finished(request->clientssl)) {
+    n = SSL_accept(request->clientssl);
+    status = get_sslstatus(request->clientssl, n);
+
+    /* Did SSL request to write bytes? */
+    if (status == SSLSTATUS_WANT_IO)
+    do {
+    n = BIO_read(request->cwbio, buf, sizeof(buf));
+    if (n > 0)
+    {
+    queue_encrypted_bytes(buf, n, request);
+    }
+    else if (!BIO_should_retry(request->cwbio))
+    exit(0);
+    // return -1;
+    } while (n>0);
+
+    if (status == SSLSTATUS_FAIL)
+    exit(0);
+    // return -1;
+
+    if (!SSL_is_init_finished(request->clientssl))
+    exit(0);
+    // return 0;
+    }
+    }
 }

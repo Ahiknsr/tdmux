@@ -2,6 +2,9 @@
 
 #include <string>
 #include <vector>
+
+#include <openssl/bio.h>
+#include <openssl/ssl.h>
 #include <uv.h>
 
 #define UNUSEDPARAM(x) (void)(x)
@@ -11,32 +14,40 @@ enum Protocol
     UNKNOWN,
     HTTP,
     HTTPS,
-    SSH
+    SSH,
+    TLS,
 };
 
 struct Request
 {
     uv_tcp_t *client;
     uv_tcp_t *server;
+    FILE *logfile;
+    SSL *clientssl;
+    BIO *crbio; /* SSL reads from, we write to. */
+    BIO *cwbio; /* SSL writes to, we read from. */
     std::string clientIp;
     std::string clientPort;
     std::string serverName;
     std::string serverIp;
     std::string serverPort;
+    Protocol protocol;
     std::vector<char> crbuffer;
     std::vector<char> cwbuffer;
     std::vector<char> srbuffer;
     std::vector<char> swbuffer;
-    FILE *logfile;
-    Protocol protocol;
+
     Request()
     {
         client = nullptr;
         server = nullptr;
+        logfile = nullptr;
+        clientssl = nullptr;
+        crbio = nullptr;
+        cwbio = nullptr;
         serverIp = "";
         serverPort = "80";
         serverName = "";
-        logfile = nullptr;
         protocol = Protocol::UNKNOWN;
     }
     Request(const Request&) = delete;

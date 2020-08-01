@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 set(CMAKE_CXX_STANDARD 14)
 
-project(X11_Clippy)
+project(tdmux)
 
 set(CMAKE_BUILD_TYPE Debug)
 
@@ -13,9 +13,9 @@ if ( MSVC )
 endif()
 
 add_executable(client tcpClient.c)
-add_executable(server tcpServer.cpp proxyUtils.cpp requestPreProcessor.cpp configManager.cpp)
+add_executable(server tcpServer.cpp proxyUtils.cpp requestPreProcessor.cpp configManager.cpp sslProcessor.cpp)
 
 include_directories(server ${CMAKE_CURRENT_SOURCE_DIR})
 
 target_link_libraries(client -luv)
-target_link_libraries(server -luv)
+target_link_libraries(server -luv -lssl -lcrypto)
