@@ -13,7 +13,7 @@ if ( MSVC )
 endif()
 
 add_executable(client tcpClient.c)
-add_executable(server tcpServer.cpp proxyUtils.cpp requestPreProcessor.cpp configManager.cpp sslProcessor.cpp)
+add_executable(server tcpServer.cpp proxyUtils.cpp requestProcessor.cpp configManager.cpp sslProcessor.cpp)
 
 include_directories(server ${CMAKE_CURRENT_SOURCE_DIR})
 

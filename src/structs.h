@@ -18,6 +18,13 @@ enum Protocol
     TLS,
 };
 
+enum SSL_STATUS 
+{
+    SSLSTATUS_OK,
+    SSLSTATUS_WANT_IO,
+    SSLSTATUS_FAIL
+};
+
 struct Request
 {
     uv_tcp_t *client;
@@ -26,6 +33,9 @@ struct Request
     SSL *clientssl;
     BIO *crbio; /* SSL reads from, we write to. */
     BIO *cwbio; /* SSL writes to, we read from. */
+    SSL *serverssl;
+    BIO *srbio; /* SSL reads from, we write to. */
+    BIO *swbio; /* SSL writes to, we read from. */
     std::string clientIp;
     std::string clientPort;
     std::string serverName;
@@ -45,6 +55,9 @@ struct Request
         clientssl = nullptr;
         crbio = nullptr;
         cwbio = nullptr;
+        serverssl = nullptr;
+        srbio = nullptr;
+        swbio = nullptr;
         serverIp = "";
         serverPort = "80";
         serverName = "";

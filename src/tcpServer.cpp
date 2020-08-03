@@ -7,7 +7,7 @@
 
 #include <configManager.h>
 #include <proxyUtils.h>
-#include <requestPreProcessor.h>
+#include <requestProcessor.h>
 #include <structs.h>
 #include <sslProcessor.h>
 
@@ -15,40 +15,6 @@ uv_loop_t *loop{nullptr};
 ConfigManager *config{nullptr};
 SSL_CTX *ssl_ctx{nullptr};
 
-void free_handle(uv_handle_t *handle)
-{
-    uv_tcp_t_r *handle_r = (uv_tcp_t_r*)handle;
-    delete handle_r;
-}
-
-void deleteRequest(Request *request)
-{
-    if (request == nullptr)
-        return;
-
-    logmsg("destroying request %s\n", getRequestInfo(request).c_str());
-
-    uv_tcp_t_r *client = (uv_tcp_t_r*)request->client;
-    uv_tcp_t_r *server = (uv_tcp_t_r*)request->server;
-
-    if (client)
-    {
-        request->client = nullptr;
-        client->request = nullptr;
-        uv_close((uv_handle_t*)client, free_handle);
-    }
-    if (server)
-    {
-        request->server = nullptr;
-        server->request = nullptr;
-        uv_close((uv_handle_t*)server, free_handle);
-    }
-    if (request->logfile)
-    {
-        fclose(request->logfile);
-    }
-    delete request;
-}
 
 void alloc_buffer(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf) 
 {
@@ -57,6 +23,92 @@ void alloc_buffer(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf)
     buf->len = suggested_size;
 }
 
+void on_encrypted_client_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf)
+{
+    uv_tcp_t_r* client_r = (uv_tcp_t_r*)client;
+    Request* request = client_r->request;
+
+    logmsg("connection %s received encrypted %ld bytes from client\n", 
+                getRequestInfo(request).c_str(), nread);
+    
+    if(nread < 0)
+    {
+        if (nread != UV_EOF)
+        {
+            logmsg("connection %s client read error %s\n", getRequestInfo(request).c_str(),
+                                                           uv_err_name(nread));
+        }
+        deleteRequest(request);
+        return;
+    }
+    else
+    {
+        auto crbuffLen = request->crbuffer.size();
+        request->crbuffer.resize(crbuffLen+nread);
+        memcpy(&(request->crbuffer[0])+crbuffLen, buf->base, nread);
+        free(buf->base);
+        int status = onSSLClientRead(request);
+        if (status<0)
+        {
+            logmsg("onSSLClientRead failed\n");
+            return;
+        }
+        logmsg("swbuffer size %d\n", request->swbuffer.size());
+        if(request->swbuffer.size())
+        {
+            for(auto& c : request->swbuffer)
+            {
+                logmsg("%c",c);
+            }
+        }
+        status = WriteToServer(request);
+        if (status<0)
+        {
+            logmsg("WriteToServer failed\n");
+            return;
+        }
+        logmsg("swbuffer size after write %d\n", request->swbuffer.size());
+    }
+}
+
+void on_encrypted_server_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf)
+{
+    uv_tcp_t_r* server_r = (uv_tcp_t_r*)client;
+    Request* request = server_r->request;
+
+    logmsg("connection %s received encrypted %ld bytes from server\n", 
+                getRequestInfo(request).c_str(), nread);
+    
+    if(nread < 0)
+    {
+        if (nread != UV_EOF)
+        {
+            logmsg("connection %s server read error %s\n", getRequestInfo(request).c_str(),
+                                                           uv_err_name(nread));
+        }
+        deleteRequest(request);
+        return;
+    }
+    else
+    {
+        auto srbuffLen = request->srbuffer.size();
+        request->srbuffer.resize(srbuffLen+nread);
+        memcpy(&(request->srbuffer[0])+srbuffLen, buf->base, nread);
+        free(buf->base);
+        int status = onSSLServerRead(request);
+        if (status<0)
+        {
+            logmsg("onSSLServerRead failed\n");
+            return;
+        }
+        status = WriteToClient(request);
+        if (status<0)
+        {
+            logmsg("WriteToClient failed\n");
+            return;
+        }
+    }
+}
 void on_client_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf)
 {
     uv_tcp_t_r* client_r = (uv_tcp_t_r*)client;
@@ -136,7 +188,7 @@ void on_server_connect(uv_connect_t *req, int status)
     logmsg("client %s connected to server %s\n", getClientInfo(request).c_str(), 
                                                  getServerInfo(request).c_str());
 
-    if (request->crbuffer.size() > 0)
+    if (request->protocol != Protocol::TLS)
     {
         write_req_t *write_req = (write_req_t*) malloc(sizeof(write_req_t));
         auto client_r_buffer_len = request->crbuffer.size();
@@ -147,9 +199,21 @@ void on_server_connect(uv_connect_t *req, int status)
             fwrite(write_req->buf.base, sizeof(char), client_r_buffer_len, request->logfile);
         uv_write((uv_write_t*)write_req, (uv_stream_t*)server, &write_req->buf, 
                   1 /*nbufs*/, on_write_end);
+        uv_read_start((uv_stream_t*) request->client, alloc_buffer, on_client_read);
+        uv_read_start((uv_stream_t*) request->server, alloc_buffer, on_server_read);
     }
-    uv_read_start((uv_stream_t*) request->client, alloc_buffer, on_client_read);
-    uv_read_start((uv_stream_t*) request->server, alloc_buffer, on_server_read);
+    if (request->protocol == Protocol::TLS)
+    {
+        CompleteHandshakeWithServer(request);
+        status =  onSSLClientRead(request);
+        if (status<0)
+            return;
+        status = WriteToServer(request);
+        if (status<0)
+            return;
+        uv_read_start((uv_stream_t*) request->client, alloc_buffer, on_encrypted_client_read);
+        uv_read_start((uv_stream_t*) request->server, alloc_buffer, on_encrypted_server_read);
+    }
 }
 
 
@@ -200,10 +264,10 @@ void on_client_init_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf
     }
     else
     {
-        logmsg("begin dump:\n");
-        for(int i=0;i<nread;i++)
-            printf("%02x ", (uint8_t)*(buf->base+i));
-        logmsg(":end dump\n");
+        // logmsg("begin dump:\n");
+        // for(int i=0;i<nread;i++)
+        //     printf("%02x ", (uint8_t)*(buf->base+i));
+        // logmsg(":end dump\n");
         auto curr_cr_buffer_len = request->crbuffer.size();
         request->crbuffer.resize(curr_cr_buffer_len+nread);
         // todo: check the buffer size and fail if exceeds threshold
@@ -212,7 +276,7 @@ void on_client_init_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf
 
         // check for Host header or CONNECT request
         // connect to server and create a pipe between server and client
-        if(preProcess(request, loop))
+        if(preProcess(request))
         {
             logmsg("client %s sent request for %s\n", getClientInfo(request).c_str(), 
                                                       getServerInfo(request).c_str());
