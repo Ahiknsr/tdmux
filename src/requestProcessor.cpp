@@ -180,7 +180,7 @@ int parseSSLRequest(Request *request)
         return false;
     }
 
-    request->protocol = Protocol::TLS;
+    request->protocol = Protocol::SSL;
 
     uint16_t sessionIDLenIndex = 5 /*Record header*/ + 4 /*Handshake header*/ 
                                 + 2 /*client version*/ + 32 /*client random*/;
@@ -203,131 +203,6 @@ int parseSSLRequest(Request *request)
     // will be already filled in
     // request->serverName = parseHostNameFromExtensions(buffer, extensionsLenIndex);
     // request->serverPort = "7878";
-    requestInitSSL(request);
+    initRequestSSL(request);
     return true;
-}
-
-/*
-process the encrypted data sent by client.
-This method is synchronous and doesn't block
-*/
-int onEncryptedClientRead(Request *request, char* src, size_t len)
-{
-    char buf[500]; /* used for copying bytes out of SSL/BIO */
-    enum SSL_STATUS status;
-    int n;
-
-    while (len > 0) 
-    {
-        n = BIO_write(request->crbio, src, len);
-
-        if (!DELETE_REQUEST_IF_FAILED("BIO_write failed", (n>0), request))
-        {
-            return -1;
-        }
-
-        src += n;
-        len -= n;
-
-        if (!SSL_is_init_finished(request->clientssl)) 
-        {
-            n = SSL_accept(request->clientssl);
-            status = getSSLStatus(request->clientssl, n);
-
-            /* Did SSL request to write bytes? */
-            if (status == SSLSTATUS_WANT_IO)
-            {
-                do 
-                {
-                    n = BIO_read(request->cwbio, buf, sizeof(buf));
-                    if (n > 0)
-                        sendBytesToClient(buf, n, request);
-                    else if (!DELETE_REQUEST_IF_FAILED("BIO_write failed",\
-                        BIO_should_retry(request->cwbio), request))
-                        return -1;
-                } while (n>0);
-            }
-
-            if (status == SSLSTATUS_FAIL)
-                return -1;
-
-            if (!SSL_is_init_finished(request->clientssl))
-            {
-                return len;
-            }
-        }
-
-        /* The encrypted data is now in the input bio so now we can perform actual
-            * read of unencrypted data. */
-        do 
-        {
-            n = SSL_read(request->clientssl, buf, sizeof(buf));
-            if (n > 0)
-            {
-                auto swbufferLen = request->swbuffer.size();
-                request->swbuffer.resize(swbufferLen+n);
-                memcpy(&(request->swbuffer[0])+swbufferLen, buf, n);
-            }
-        } while (n > 0);
-
-        status = getSSLStatus(request->clientssl, n);
-
-        /* Did SSL request to write bytes? This can happen if peer has requested SSL
-            * renegotiation. */
-        if (status == SSLSTATUS_WANT_IO)
-        {
-            do 
-            {
-                n = BIO_read(request->cwbio, buf, sizeof(buf));
-                if (n > 0)
-                    sendBytesToClient(buf, n, request);
-                else if (!DELETE_REQUEST_IF_FAILED("BIO_write failed",\
-                    BIO_should_retry(request->cwbio), request))
-                    return -1;
-            } while (n>0);
-        }
-
-        if (status == SSLSTATUS_FAIL)
-            return -1;
-            // delete request
-    }
-    return len;
-}
-
-int encryptAndWriteToClient(Request *request, char *src, size_t len)
-{
-    if (!SSL_is_init_finished(request->clientssl))
-        return len;
-
-    char buf[500]; /* used for copying bytes out of SSL/BIO */
-    enum SSL_STATUS status;
-
-    while (len>0)
-    {
-        int n = SSL_write(request->clientssl, src, len);
-        status = getSSLStatus(request->clientssl, n);
-
-        if (n>0) 
-        {
-            len-=n;
-            src+=n;
-
-            do 
-            {
-                n = BIO_read(request->cwbio, buf, sizeof(buf));
-                if (n > 0)
-                    sendBytesToClient(buf, n, request);
-                else if (!DELETE_REQUEST_IF_FAILED("BIO_write failed",\
-                    BIO_should_retry(request->cwbio), request))
-                    return -1;
-            } while (n>0);
-        }
-
-        if (status == SSLSTATUS_FAIL)
-        return -1;
-
-        if (n==0)
-            break;
-    }
-    return len;
 }

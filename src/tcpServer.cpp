@@ -13,10 +13,8 @@
 
 uv_loop_t *loop{nullptr};
 ConfigManager *config{nullptr};
-SSL_CTX *ssl_ctx{nullptr};
 
-
-void alloc_buffer(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf) 
+void alloc_buffer(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf)
 {
     UNUSEDPARAM(handle);
     buf->base = (char*) malloc(suggested_size);
@@ -28,15 +26,15 @@ void on_encrypted_client_read(uv_stream_t *client, ssize_t nread, const uv_buf_t
     uv_tcp_t_r* client_r = (uv_tcp_t_r*)client;
     Request* request = client_r->request;
 
-    logmsg("connection %s received encrypted %ld bytes from client\n", 
+    logmsg("connection %s received encrypted %ld bytes from client\n",
                 getRequestInfo(request).c_str(), nread);
-    
+
     if(nread < 0)
     {
         if (nread != UV_EOF)
         {
-            logmsg("connection %s client read error %s\n", getRequestInfo(request).c_str(),
-                                                           uv_err_name(nread));
+            logmsg("connection %s client read error %s\n",
+                        getRequestInfo(request).c_str(), uv_err_name(nread));
         }
         deleteRequest(request);
         return;
@@ -53,21 +51,12 @@ void on_encrypted_client_read(uv_stream_t *client, ssize_t nread, const uv_buf_t
             logmsg("onSSLClientRead failed\n");
             return;
         }
-        logmsg("swbuffer size %d\n", request->swbuffer.size());
-        if(request->swbuffer.size())
-        {
-            for(auto& c : request->swbuffer)
-            {
-                logmsg("%c",c);
-            }
-        }
-        status = WriteToServer(request);
+        status = writeToServer(request);
         if (status<0)
         {
             logmsg("WriteToServer failed\n");
             return;
         }
-        logmsg("swbuffer size after write %d\n", request->swbuffer.size());
     }
 }
 
@@ -76,15 +65,15 @@ void on_encrypted_server_read(uv_stream_t *client, ssize_t nread, const uv_buf_t
     uv_tcp_t_r* server_r = (uv_tcp_t_r*)client;
     Request* request = server_r->request;
 
-    logmsg("connection %s received encrypted %ld bytes from server\n", 
+    logmsg("connection %s received encrypted %ld bytes from server\n",
                 getRequestInfo(request).c_str(), nread);
-    
+
     if(nread < 0)
     {
         if (nread != UV_EOF)
         {
-            logmsg("connection %s server read error %s\n", getRequestInfo(request).c_str(),
-                                                           uv_err_name(nread));
+            logmsg("connection %s server read error %s\n", 
+                        getRequestInfo(request).c_str(), uv_err_name(nread));
         }
         deleteRequest(request);
         return;
@@ -95,16 +84,23 @@ void on_encrypted_server_read(uv_stream_t *client, ssize_t nread, const uv_buf_t
         request->srbuffer.resize(srbuffLen+nread);
         memcpy(&(request->srbuffer[0])+srbuffLen, buf->base, nread);
         free(buf->base);
+
         int status = onSSLServerRead(request);
         if (status<0)
         {
             logmsg("onSSLServerRead failed\n");
             return;
         }
-        status = WriteToClient(request);
+        status = writeToClient(request);
         if (status<0)
         {
             logmsg("WriteToClient failed\n");
+            return;
+        }
+        status = writeToServer(request);
+        if (status<0)
+        {
+            logmsg("WriteToServer failed\n");
             return;
         }
     }
@@ -115,13 +111,13 @@ void on_client_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf)
     Request* request = client_r->request;
 
     logmsg("connection %s received %ld bytes from client\n", getRequestInfo(request).c_str(), nread);
-    
+
     if(nread < 0)
     {
         if (nread != UV_EOF)
         {
-            logmsg("connection %s client read error %s\n", getRequestInfo(request).c_str(),
-                                                           uv_err_name(nread));
+            logmsg("connection %s client read error %s\n", 
+                        getRequestInfo(request).c_str(), uv_err_name(nread));
         }
         deleteRequest(request);
         return;
@@ -131,16 +127,16 @@ void on_client_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf)
         // write to server using the existing buffer
         write_req_t *write_req = (write_req_t*) malloc(sizeof(write_req_t));
         write_req->buf = uv_buf_init((char*) buf->base, nread);
-    
+
         if (config->isEnabled(config->HTTPLOGGING))
             fwrite(buf->base, sizeof(char), nread, request->logfile);
 
-        uv_write((uv_write_t*)write_req, (uv_stream_t*)request->server, 
+        uv_write((uv_write_t*)write_req, (uv_stream_t*)request->server,
                     &write_req->buf, 1 /*nbufs*/, on_write_end);
     }
 }
 
-void on_server_read(uv_stream_t *server, ssize_t nread, const uv_buf_t *buf) 
+void on_server_read(uv_stream_t *server, ssize_t nread, const uv_buf_t *buf)
 {
     uv_tcp_t_r* server_r = (uv_tcp_t_r*)server;
     Request* request = server_r->request;
@@ -151,8 +147,8 @@ void on_server_read(uv_stream_t *server, ssize_t nread, const uv_buf_t *buf)
     {
         if (nread != UV_EOF)
         {
-            logmsg("connection %s server read error %s\n", getRequestInfo(request).c_str(),
-                                                           uv_err_name(nread));
+            logmsg("connection %s server read error %s\n", 
+                        getRequestInfo(request).c_str(), uv_err_name(nread));
         }
         deleteRequest(request);
         return;
@@ -162,53 +158,72 @@ void on_server_read(uv_stream_t *server, ssize_t nread, const uv_buf_t *buf)
         // write to client using the existing buffer
         write_req_t *write_req = (write_req_t*) malloc(sizeof(write_req_t));
         write_req->buf = uv_buf_init((char*) buf->base, nread);
-    
+
         if (config->isEnabled(config->HTTPLOGGING))
             fwrite(buf->base, sizeof(char), nread, request->logfile);
 
-        uv_write((uv_write_t*)write_req, (uv_stream_t*)request->client, 
+        uv_write((uv_write_t*)write_req, (uv_stream_t*)request->client,
                     &write_req->buf, 1 /*nbufs*/, on_write_end);
     }
 }
 
-void on_server_connect(uv_connect_t *req, int status) 
+/*
+called when we connect to server to send the data in crbuffer
+to server.
+*/
+void writeExistingDataToServer(Request *request)
+{
+    uv_tcp_t_r *server = (uv_tcp_t_r*)request->server;
+    write_req_t *write_req = (write_req_t*) malloc(sizeof(write_req_t));
+
+    auto crBuffLen = request->crbuffer.size();
+    write_req->buf = uv_buf_init((char*) malloc(crBuffLen), crBuffLen);
+    memcpy(write_req->buf.base, &request->crbuffer[0], crBuffLen);
+    request->crbuffer.resize(0);
+    if (config->isEnabled(config->HTTPLOGGING))
+        fwrite(write_req->buf.base, sizeof(char), crBuffLen, request->logfile);
+    uv_write((uv_write_t*)write_req, (uv_stream_t*)server, &write_req->buf,
+                1 /*nbufs*/, on_write_end);
+}
+
+void on_server_connect(uv_connect_t *req, int status)
 {
     uv_connect_t_r *req_r = (uv_connect_t_r*)req;
     Request *request = req_r->request;
-    uv_tcp_t_r *server = (uv_tcp_t_r*)request->server;
     delete req_r;
 
-    if (status < 0) 
+    if (status < 0)
     {
         logmsg("error on_server_connect %s \n", uv_err_name(status));
         deleteRequest(request);
         return;
     }
     assert(status == 0);
-    logmsg("client %s connected to server %s\n", getClientInfo(request).c_str(), 
+    logmsg("client %s connected to server %s\n", getClientInfo(request).c_str(),
                                                  getServerInfo(request).c_str());
 
-    if (request->protocol != Protocol::TLS)
+    /*
+    for any protocol other than SSL we act like a two way 
+    pipe between client and server
+    */
+    if (request->protocol != Protocol::SSL)
     {
-        write_req_t *write_req = (write_req_t*) malloc(sizeof(write_req_t));
-        auto client_r_buffer_len = request->crbuffer.size();
-        write_req->buf = uv_buf_init((char*) malloc(client_r_buffer_len), client_r_buffer_len);
-        memcpy(write_req->buf.base, &request->crbuffer[0], client_r_buffer_len);
-        request->crbuffer.resize(0);
-        if (config->isEnabled(config->HTTPLOGGING))
-            fwrite(write_req->buf.base, sizeof(char), client_r_buffer_len, request->logfile);
-        uv_write((uv_write_t*)write_req, (uv_stream_t*)server, &write_req->buf, 
-                  1 /*nbufs*/, on_write_end);
+        writeExistingDataToServer(request);
         uv_read_start((uv_stream_t*) request->client, alloc_buffer, on_client_read);
         uv_read_start((uv_stream_t*) request->server, alloc_buffer, on_server_read);
     }
-    if (request->protocol == Protocol::TLS)
+    /*
+    In case of SSL protocol we will decrypt the data from client
+    and then encrypt it again and will send it to server.
+    Also vice-versa.
+    */
+    if (request->protocol == Protocol::SSL)
     {
-        CompleteHandshakeWithServer(request);
+        initSSLHandshakeWithServer(request);
         status =  onSSLClientRead(request);
         if (status<0)
             return;
-        status = WriteToServer(request);
+        status = writeToServer(request);
         if (status<0)
             return;
         uv_read_start((uv_stream_t*) request->client, alloc_buffer, on_encrypted_client_read);
@@ -216,12 +231,11 @@ void on_server_connect(uv_connect_t *req, int status)
     }
 }
 
-
-void on_resolved(uv_getaddrinfo_t *resolver, int status, struct addrinfo *res) 
+void on_resolved(uv_getaddrinfo_t *resolver, int status, struct addrinfo *res)
 {
     uv_getaddrinfo_t_r *resolver_r = (uv_getaddrinfo_t_r*)resolver;
     Request *request = resolver_r->request;
-    if (status < 0) 
+    if (status < 0)
     {
         logmsg("getaddrinfo callback error %s\n", uv_err_name(status));
         deleteRequest(request);
@@ -242,14 +256,14 @@ void on_resolved(uv_getaddrinfo_t *resolver, int status, struct addrinfo *res)
 
         uv_tcp_init(loop, (uv_tcp_t*)server);
 
-        uv_tcp_connect((uv_connect_t*)connect_req, (uv_tcp_t*)server, 
-                    (const struct sockaddr*) res->ai_addr, on_server_connect);   
+        uv_tcp_connect((uv_connect_t*)connect_req, (uv_tcp_t*)server,
+                    (const struct sockaddr*) res->ai_addr, on_server_connect);
     }
     delete resolver_r;
     uv_freeaddrinfo(res);
 }
 
-void on_client_init_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf) 
+void on_client_init_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf)
 {
     // stop reading while we process
     uv_read_stop(client);
@@ -264,10 +278,6 @@ void on_client_init_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf
     }
     else
     {
-        // logmsg("begin dump:\n");
-        // for(int i=0;i<nread;i++)
-        //     printf("%02x ", (uint8_t)*(buf->base+i));
-        // logmsg(":end dump\n");
         auto curr_cr_buffer_len = request->crbuffer.size();
         request->crbuffer.resize(curr_cr_buffer_len+nread);
         // todo: check the buffer size and fail if exceeds threshold
@@ -278,7 +288,7 @@ void on_client_init_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf
         // connect to server and create a pipe between server and client
         if(preProcess(request))
         {
-            logmsg("client %s sent request for %s\n", getClientInfo(request).c_str(), 
+            logmsg("client %s sent request for %s\n", getClientInfo(request).c_str(),
                                                       getServerInfo(request).c_str());
 
             struct addrinfo hints;;
@@ -290,9 +300,8 @@ void on_client_init_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf
             uv_getaddrinfo_t_r *resolver = new uv_getaddrinfo_t_r();
             resolver->request = request;
 
-            int result = uv_getaddrinfo(loop, (uv_getaddrinfo_t*)resolver, on_resolved, 
+            int result = uv_getaddrinfo(loop, (uv_getaddrinfo_t*)resolver, on_resolved,
                                    request->serverName.c_str(), request->serverPort.c_str(), &hints);
-
             if (result)
             {
                 delete resolver;
@@ -306,9 +315,9 @@ void on_client_init_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf
     }
 }
 
-void on_new_connection(uv_stream_t *server, int status) 
+void on_new_connection(uv_stream_t *server, int status)
 {
-    if (status < 0) 
+    if (status < 0)
     {
         logmsg("New connection error %s\n", uv_strerror(status));
         return;
@@ -327,7 +336,7 @@ void on_new_connection(uv_stream_t *server, int status)
         logmsg("new connection from : %s \n", getClientInfo(request).c_str());
         uv_read_start((uv_stream_t*) client, alloc_buffer, on_client_init_read);
     }
-    else 
+    else
     {
         logmsg("uv_accept failed\n");
         deleteRequest(request);
@@ -335,7 +344,7 @@ void on_new_connection(uv_stream_t *server, int status)
 }
 
 
-int main() 
+int main()
 {
     const std::string IP = "0.0.0.0";
     const int PORT = 7000;
@@ -345,8 +354,6 @@ int main()
 
     config = new ConfigManager();
     loop = uv_default_loop();
-    // behind config?
-    ssl_ctx = get_ssl_ctx();
 
     uv_tcp_init(loop, &server);
 
