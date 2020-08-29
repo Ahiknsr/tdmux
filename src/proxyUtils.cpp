@@ -21,11 +21,58 @@ void logmsg(const char* format, ...)
     fflush(stdout);
 }
 
+void deleteRequest(Request *request)
+{
+    if (request == nullptr)
+        return;
+
+    logmsg("destroying request %s\n", getRequestInfo(request).c_str());
+
+    uv_tcp_t_r *client = (uv_tcp_t_r*)request->client;
+    uv_tcp_t_r *server = (uv_tcp_t_r*)request->server;
+
+    if (client)
+    {
+        if (request->clientssl)
+        {
+            free(request->clientssl);
+            BIO_free(request->crbio);
+            BIO_free(request->cwbio);
+        }
+        request->client = nullptr;
+        client->request = nullptr;
+        uv_close((uv_handle_t*)client, freeHandle);
+    }
+    if (server)
+    {
+        if (request->serverssl)
+        {
+            free(request->serverssl);
+            BIO_free(request->srbio);
+            BIO_free(request->swbio);
+        }
+        request->server = nullptr;
+        server->request = nullptr;
+        uv_close((uv_handle_t*)server, freeHandle);
+    }
+    if (request->logfile)
+    {
+        fclose(request->logfile);
+    }
+    delete request;
+}
+
 void free_write_req(uv_write_t *req) 
 {
     write_req_t *wr = (write_req_t*) req;
     free(wr->buf.base);
     free(wr);
+}
+
+void freeHandle(uv_handle_t *handle)
+{
+    uv_tcp_t_r *handle_r = (uv_tcp_t_r*)handle;
+    delete handle_r;
 }
 
 void on_write_end(uv_write_t *req, int status) 

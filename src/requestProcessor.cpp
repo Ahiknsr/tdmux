@@ -5,7 +5,9 @@
 
 #include <structs.h>
 #include <proxyUtils.h>
-#include <requestPreProcessor.h>
+#include <requestProcessor.h>
+
+extern ConfigManager *config;
 
 const std::string DEFAULT_PORT = "80";
 const std::string HTTPS_PORT = "443";
@@ -17,10 +19,10 @@ const std::string SPACE = " ";
 const std::string CONNECT_RESPONSE = "HTTP/1.1 200 Connection established\r\n\r\n";
 const std::string SSH_PREFIX = "SSH"; // needs to be more specific
 
-int preProcess(Request *request, uv_loop_t *loop)
+int preProcess(Request *request)
 {
     assert(request->protocol == Protocol::UNKNOWN);
-    if (parseConnectRequest(request, loop))
+    if (parseConnectRequest(request))
         return true;
     if (parseHostHeader(request))
         return true;
@@ -31,10 +33,8 @@ int preProcess(Request *request, uv_loop_t *loop)
     return false;
 }
 
-int parseConnectRequest(Request *request, uv_loop_t *loop)
+int parseConnectRequest(Request *request)
 {
-    UNUSEDPARAM(loop);
-
     auto buffer = request->crbuffer;
     if (buffer.size() <= CONNECT.size())
         return 0;
@@ -48,9 +48,6 @@ int parseConnectRequest(Request *request, uv_loop_t *loop)
     auto headerDelimiterIndex = buffer_s.find(HEADERDELIMITER);
     if (headerDelimiterIndex == std::string::npos)
         return 0;
-
-    request->protocol = Protocol::HTTPS;
-    request->serverPort = HTTPS_PORT;
 
     auto hostAndPort = buffer_s.substr(CONNECT.size()+1,headerDelimiterIndex-CONNECT.size());
     auto spaceIndex = hostAndPort.find(SPACE);
@@ -73,14 +70,18 @@ int parseConnectRequest(Request *request, uv_loop_t *loop)
         request->crbuffer.resize(0);
         uv_write((uv_write_t*)write_req, (uv_stream_t*)request->client, &write_req->buf, 1 /*nbufs*/, on_write_end);
     }
+    if (config->isEnabled(config->MITMHTTPCONNECT))
+    {
+        logmsg("performing mitm\n");
+        request->protocol = Protocol::UNKNOWN;
+        return false;
+    }
+    request->protocol = Protocol::HTTPS;
     return true;
 }
 
 int parseHostHeader(Request *request)
 {
-    request->serverPort = DEFAULT_PORT;
-    request->serverName.clear();
-
     auto buffer = request->crbuffer;
     if (buffer.size() <= HOSTKEY.size())
         return 0;
@@ -110,6 +111,8 @@ int parseHostHeader(Request *request)
     request->protocol = Protocol::HTTP;
     request->serverName = buffer_s.substr(hostIndex+HOSTKEY.size(), 
                            hostIndexEnd-hostIndex-HOSTKEY.size());
+    request->serverPort = DEFAULT_PORT;
+    request->serverName.clear();
     // logmsg("\nhost is %s\n", request->serverName.c_str());
     auto colonIndex = request->serverName.find(COLON);
     if (colonIndex == std::string::npos)
@@ -139,77 +142,6 @@ int parseSSHRequest(Request *request)
     return true;
 }
 
-/*
-copy n bytes from src to dest
-ordering of bytes copied depends on endianness
-*/
-void copybytes(uint8_t *dest, uint8_t *src, size_t n)
-{
-    auto isLittleEndian =[](){
-        uint16_t temp = 1;
-        return (*(uint8_t*)(&temp)) == 1;
-    };
-
-    if (n==0)
-        return;
-    
-    bool copyInReverseOrder = isLittleEndian();
-    if(copyInReverseOrder)
-    {
-        dest=dest+n-1;
-        while(n>0)
-        {
-            *dest=*src;
-            dest--;
-            src++;
-            n--;
-        }
-    }
-    else
-    {
-        memcpy(dest, src, n);
-    }
-    
-}
-
-// zero extension check?
-std::string parseHostNameFromExtensions(const std::vector<char> buffer, uint16_t startIndex)
-{
-    uint16_t expectedExtensionLength{0};
-    copybytes((uint8_t*)&expectedExtensionLength, (uint8_t*)&buffer[startIndex], 2);
-
-    logmsg("expectedLen %d\n", expectedExtensionLength);
-    assert(expectedExtensionLength == (buffer.size() - startIndex -2));
-
-    uint16_t currIndex = startIndex+2;
-
-    uint16_t extensionId{0};
-    uint16_t extensionLen{0};
-    uint8_t firstEntryId{0};
-    uint16_t hostNameLen{0};
-
-    uint16_t SNIExtensionId = 0x0000;
-    uint8_t hostNameId = 0x00;
-    while (currIndex < startIndex + 2 + expectedExtensionLength)
-    {
-        copybytes((uint8_t*)&extensionId, (uint8_t*)&buffer[currIndex], 2);
-        copybytes((uint8_t*)&extensionLen, (uint8_t*)&buffer[currIndex+2], 2);
-        logmsg("currIndex: %d\n", currIndex);
-        logmsg("extn id: %02x %02x\n", (uint8_t)buffer[currIndex], (uint8_t)buffer[currIndex+1]);
-        logmsg("extn len: %02x %02x\n", (uint8_t)buffer[currIndex+2], (uint8_t)buffer[currIndex+3]);
-        if (SNIExtensionId == extensionId)
-        {
-            copybytes((uint8_t*)&firstEntryId, (uint8_t*)&buffer[currIndex+6], 1);
-            assert(firstEntryId == hostNameId);
-            copybytes((uint8_t*)&hostNameLen, (uint8_t*)&buffer[currIndex+7], 2);
-            std::string hostName(&buffer[currIndex+9], &buffer[currIndex+9+hostNameLen]);
-            logmsg("hostname %s\n", hostName.c_str());
-        }
-        currIndex = currIndex + 4 + extensionLen;
-    }
-    exit(0);
-    return {};
-}
 
 /*
 parse the clientHello, SNI extension needed
@@ -233,10 +165,9 @@ int parseSSLRequest(Request *request)
 
     uint16_t messageLength{0};
     
-    copybytes((uint8_t*)&messageLength, (uint8_t*)&buffer[3], 2);
+    copyBytes((uint8_t*)&messageLength, (uint8_t*)&buffer[3], 2);
 
     uint16_t expectedBufferSize = messageLength + 5;
-    logmsg("messageLength %d buffer %d\n", messageLength, buffer.size());
 
     if (buffer.size() > expectedBufferSize)
     {
@@ -249,45 +180,29 @@ int parseSSLRequest(Request *request)
         return false;
     }
 
+    request->protocol = Protocol::SSL;
+
     uint16_t sessionIDLenIndex = 5 /*Record header*/ + 4 /*Handshake header*/ 
                                 + 2 /*client version*/ + 32 /*client random*/;
     
     uint16_t sessionIDLength{0};
-    copybytes((uint8_t*)&sessionIDLength, (uint8_t*)(&buffer[sessionIDLenIndex]), 1);
-    logmsg("sessionIDLenIndex %d sessionId length %d\n", sessionIDLenIndex, sessionIDLength);
-
-    for(uint16_t i=0;i<sessionIDLength;i++)
-    {
-        logmsg("%02x ", (uint8_t)buffer[sessionIDLenIndex+1+i]);
-    }
-    logmsg("\n");
+    copyBytes((uint8_t*)&sessionIDLength, (uint8_t*)(&buffer[sessionIDLenIndex]), 1);
 
     uint16_t cipherSuitesLenIndex = sessionIDLenIndex + sessionIDLength + 1;
     uint16_t cipherSuitesLength{0};
-    copybytes((uint8_t*)&cipherSuitesLength, (uint8_t*)(&buffer[cipherSuitesLenIndex]), 2);
-    logmsg("cipherSuitesLenIndex %d cipherSuitesLength %d\n", cipherSuitesLenIndex, cipherSuitesLength);
-
-    for(uint16_t i=0;i<cipherSuitesLength;i+=2)
-    {
-        logmsg("%02x %02x ", (uint8_t)buffer[cipherSuitesLenIndex+2+i], 
-                            (uint8_t)buffer[cipherSuitesLenIndex+3+i]);
-    }
-    logmsg("\n");
+    copyBytes((uint8_t*)&cipherSuitesLength, (uint8_t*)(&buffer[cipherSuitesLenIndex]), 2);
 
     uint8_t compressionMethodLenIndex = cipherSuitesLenIndex + cipherSuitesLength + 2;
     uint8_t compressionMethodLength{0};
-    copybytes(&compressionMethodLength,(uint8_t*)(&buffer[compressionMethodLenIndex]), 1);
+    copyBytes(&compressionMethodLength,(uint8_t*)(&buffer[compressionMethodLenIndex]), 1);
 
     uint8_t extensionsLenIndex = compressionMethodLenIndex + compressionMethodLength + 1;
     uint16_t extensionsLength{0};
-    copybytes((uint8_t*)&extensionsLength,(uint8_t*)(&buffer[extensionsLenIndex]), 2);
+    copyBytes((uint8_t*)&extensionsLength,(uint8_t*)(&buffer[extensionsLenIndex]), 2);
 
-    logmsg("extLenIndex %d buf size %d\n", extensionsLenIndex, buffer.size());
-    for(uint16_t i=extensionsLenIndex;i<buffer.size();i++)
-    {
-        logmsg("%02x ",(uint8_t)buffer[i]);
-    }
-    logmsg("\n");
-    parseHostNameFromExtensions(buffer, extensionsLenIndex);
-    exit(0);
+    // will be already filled in
+    // request->serverName = parseHostNameFromExtensions(buffer, extensionsLenIndex);
+    // request->serverPort = "7878";
+    initRequestSSL(request);
+    return true;
 }
